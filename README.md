@@ -1,6 +1,6 @@
 # 局域网传输
 
-零依赖的局域网文件与文本传输工具。浏览器上传、下载、删除文件，并在手机与电脑之间同步文本。界面为 Apple（iOS）风格，自动适配浅色 / 深色模式。
+零依赖的局域网文件与文本传输工具。浏览器上传、下载、删除文件，并在手机与电脑之间同步文本。自动适配浅色 / 深色模式。
 
 **页面布局**：顶部导航下用分段 Tab「传输 | 文本」切换主内容——「传输」为上传与文件列表，「文本」为跨设备剪贴板。窄屏默认「传输」，点顶栏「文本」即可发/看剪贴板，文件再多也不必长滚到底；桌面宽屏（≥1024px）左右双栏同时显示传输与文本。
 
@@ -80,9 +80,8 @@ python server.py --host 0.0.0.0 --ttl-days 7
 - **文件预览**：图片 / 视频 / 音频 / PDF 直接内置播放；压缩包（zip）展示目录树
 - **文档排版预览**：`.docx` 渲染为带格式的网页（标题层级、加粗 / 斜体 / 下划线、对齐、表格、项目符号与编号列表）；`.xlsx` 渲染为表格；`.pptx` 按幻灯片分块展示。全部在服务端用标准库解析，**零第三方依赖**，旧版 `.doc/.xls/.ppt` 提示下载
 - **文件列表**：**最新内容置顶**——刚传完的文件排在最前面，已有文件的相对顺序保持稳定，不按文件名 / 大小 / 类型 / 文件自身修改时间重排。传输先后顺序由服务端记录在 `shared/.file-order.json`（隐藏文件，不在列表中显示），服务重启、刷新页面、跨设备都保持一致；直接拷进 `shared/` 目录、没有传输记录的文件按修改时间倒序排在后面。删除文件时同步移除其顺序记录
-- **中文命令行日志**：每条请求打印为「时间 + 来源 IP + 中文动作 + 中文状态」，例如 `[14:49:24] 192.168.1.5 - 下载文件「会议记录.txt」 → 200 成功`，未知路由原样回退为 `METHOD /path`，不影响请求本身
 - **传输过程顺序稳定**：多文件上传时每传完一个就刷新一次列表，新文件出现在顶部，已在列表中的文件相对位置不发生任何变动；文件序号、进度、状态与重试结果的显示均不受刷新影响
-- **加载性能**：页面带 ETag 协商缓存（内容未变返回 304，不重传 86KB 页面）、文本响应 gzip 压缩（约 -70% 传输体积）、favicon 内联零请求、首屏四个接口并行加载、列表内容未变化时跳过 DOM 重建
+- **加载性能**：页面带 ETag 协商缓存、文本响应 gzip 压缩、favicon 内联零请求、首屏四个接口并行加载、列表内容未变化时跳过 DOM 重建
 
 ## 文件位置
 
@@ -117,24 +116,3 @@ iOS 沙盒限制：微信里的文件要离开微信，**必须先经过系统"�
 2. 访问的是终端显示的局域网地址，而不是 `127.0.0.1`；
 3. 路由器未开启客户端隔离；
 4. Windows 防火墙允许 Python（四文件）或 `lan-transfer.exe`（单文件包）接收入站连接。
-
-## HTTP 接口（开发者参考）
-
-- `GET  /` — 传输页面
-- `GET  /api/files` — 文件列表 `{files:[{name, size, date}], filesEpoch, latestName}`（最新置顶；`filesEpoch` 随上传/删除变化，前端轮询感知「有新文件」轻提醒；`latestName` 为列表首项或 null）
-- `GET  /download/<name>` — 下载文件（attachment，支持 `Range` / `If-Range`，带强 `ETag` + `Last-Modified`；文件被替换后旧 ETag 的 If-Range 回 200 整包）
-- `POST /api/download-zip` — 多选打包下载，body `{"names":["a.txt","photos/b.jpg"]}`；流式 `application/zip`；路径前缀保留；缺文件整请求失败；上限 500 个 / 未压缩合计 2 GiB；guest 可下；不对 zip 做 Range
-- `GET  /preview/<name>` — 预览文件（inline，支持 Range，视频可拖动进度条）
-- `GET  /preview/doc/<name>` — 将 `.docx/.xlsx/.pptx` 渲染为带格式的 HTML 页面（供 iframe 展示排版）；其他格式返回提示页
-- `GET  /api/archive/list?name=<zip>` — 列出 zip 压缩包内容树 `{supported, entries:[{path,size,dir}]}`；非 zip 返回 `{supported:false}`
-- `GET  /api/doc/text?name=<docx|xlsx|pptx>` — 提取 Office 文档纯文本 `{supported, text}`；旧版 .doc/.xls/.ppt 或不支持的格式返回 `{supported:false}`（纯文本兜底接口，排版预览请使用 `/preview/doc/`）
-- `POST /upload?filename=<name>` — 整包上传（请求体为原始字节，一次性整体上传）；**仅建议小文件 / 脚本使用，超过 32 MiB 直接拒绝（413）**，大文件请用下方分片 API（网页上传已自动分片、可断点续传）
-- `POST /api/upload/init` — 创建 / 恢复分片上传会话，body `{"name","size","lastModified","sessionId?","force?"}`，返回 `{sessionId, offset, exists, chunkSize, maxChunkSize}`；带 `sessionId` 即查询断点，`exists:true` 表示服务端已有同名同大小文件（秒传），`force:true` 跳过秒传强制覆盖；**续接**：不带或带失效 `sessionId` 时，服务端按 name+size+lastModified 指纹复用未完成会话并返回已传 `offset`（响应 `resumed`/`resumedBy`=`"sessionId"|"fingerprint"|null`），`fresh:true` 丢弃旧进度新开
-- `POST /api/upload/chunk?sessionId=<id>` — 追加一个分片，header `X-Upload-Offset`（起始字节）、可选 `X-Chunk-CRC32`（hex 校验，失败自动回滚该片）；偏移不连续返回 409 并附服务端偏移
-- `POST /api/upload/complete?sessionId=<id>` — 结束会话，把临时分片落为正式文件
-- `GET  /api/upload/status?sessionId=<id>` — 查询已接收偏移量（重试前核对用）
-- `DELETE /api/upload/session?sessionId=<id>` — 放弃会话并删除临时分片
-- `POST /delete` — 删除文件，body `{"filename": "名称"}`
-- `GET  /api/clipboard` — 返回历史记录 `{items: [{id, text, ip, time}], seq, text, updated}`（`text`/`updated` 等价于最新一条，保留给旧客户端）；支持 `If-None-Match`，内容未变返回 304
-- `POST /api/clipboard` — 追加一条历史，body `{"text": "内容"}`；单条上限 100000 字符，内容为空返回 400
-- `DELETE /api/clipboard?id=<id>` — 删除单条历史（不存在返回 404）
