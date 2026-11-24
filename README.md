@@ -1,4 +1,4 @@
-# 局域网传输（Python 版）
+# 局域网传输
 
 零依赖的局域网文件与文本传输工具。浏览器上传、下载、删除文件，并在手机与电脑之间同步文本。界面为 Apple（iOS）风格，自动适配浅色 / 深色模式。
 
@@ -25,42 +25,6 @@
 **登录中的设备（会话吊销）**：设了 `--pin` 后，主人在导航「保护」抽屉下半可看到当前已登录的设备（模糊 IP、最近活跃、本机/访客标记），可单个「移出」或「全部退出（含本机）」；被移出的设备约 3 秒内回到口令页，需重新输入口令。访客看不到此区，也无权操作。会话只存在内存里，重启服务后所有设备都需重新登录。
 
 **共享文件自动过期（默认关）**：启动时加 `--ttl-days N`（或环境变量 `LAN_TRANSFER_TTL_DAYS=N`，`N` 为正整数天数）。开启后，共享目录里的文件会按**入库时间**（网页上传完成时写入 `.file-order.json` 的 `ingestedAt`；直接拷进目录的文件无入库记录时回退用修改时间）超过 N 天自动删除；启动时扫一次，之后定时扫。**风险：会真正删除用户文件**，请确认后再开。以下不会被本功能删除：以 `.` 开头的隐藏文件（含 `.file-order.json`、`.clipboard-history.json`）、剪贴板库、以及 `.uploads/` 下未完成的上传分片——后者仍由原来的「超过 7 天未活动」会话清理单独负责，与 `--ttl-days` 互不相干。未设置或 `0` 表示关闭，不会因 TTL 删除任何共享文件。`GET /api/config` 的 `ttlDays` 字段：`0`=关，`≥1`=保留天数。
-
-## 双交付（四文件 zip / Windows 单文件 exe）
-
-本工具始终保留**四文件**交付：`server.py`、`index.html`、`run.bat`、`README.md`。有 Python 的电脑直接解压双击 `run.bat` 即可。
-
-另可选 **Windows 单文件** `lan-transfer.exe`（PyInstaller onefile，须在 **Windows 构建机**用仓库 `packaging/windows/build.bat` 打出；本仓库的 Linux 环境不产正式 exe）。用法与参数和四文件一致（`--pin` / `--guest-pin` / `--ttl-days` / `--port` / `--shared-dir` 等）。
-
-| | 四文件 zip | `lan-transfer.exe` |
-|--|--|--|
-| 需要本机 Python | 是（3.9+） | 否 |
-| 页面 / 业务 | 同版源码 | 同版源码（`index.html` 打进包内） |
-| 默认共享目录 | 解压目录旁 `shared/` | **exe 同级** `shared/`（不会写到 `%TEMP%\_MEI*`） |
-| 缺省启动 | `run.bat` = `--no-prompt --open-browser` | frozen 缺省同样 `--no-prompt --open-browser`；直接跑 `python server.py` 仍保持源码交互默认 |
-
-构建步骤见仓库内 `packaging/windows/README.md`（不进四文件 zip）。
-
-## 杀软 / SmartScreen（未签名 exe）
-
-`lan-transfer.exe` **默认未做代码签名**。Windows SmartScreen 可能提示「Windows 已保护你的电脑 / 未知发布者」；Microsoft Defender 或其它杀软也可能对 onefile（启动时解压到 `%TEMP%\_MEI*`）报启发式风险——这是常见误报，**不是**程序在改系统文件。
-
-建议：
-
-1. 只从可信渠道获取，并用发布说明中的 **SHA256** 核对 exe；
-2. SmartScreen：点「更多信息」→「仍要运行」；
-3. Defender：在「病毒和威胁防护」里允许该文件，或把 exe 所在目录加入排除（仅限你信任的副本）；
-4. 首次启动若弹出防火墙，请在**专用网络**允许 `lan-transfer.exe` 入站（不再是 `python.exe`）；
-5. onefile 首次启动略慢、体积偏大属正常（自解压到临时目录）；**用户文件应落在 exe 旁 `shared/`**，若看到写入 `%TEMP%\_MEI*` 则构建有误，请停用该副本。
-
-需要企业静默安装或消除 SmartScreen 时，需另行代码签名（本交付不做）。误报极严重时可改用四文件 zip，或后续考虑 onedir 备选（本刀不产）。
-
-## 端口逻辑说明
-
-- **启动预检**：绑定前先做端口探测，失败原因会明确区分——"已被其他程序占用"、"位于 Windows 保留端口段（Hyper-V/WSL 等预留）"、"本机不存在该 IP 地址"
-- **显式指定端口**（`--port`）：不可用时直接报错退出，不会擅自更换端口
-- **默认端口**：8080 不可用时自动降级到候选端口，终端提示实际端口
-- **关闭释放**：Ctrl+C 或进程退出时立即关闭监听 socket 并释放端口，终端打印"端口已释放"
 
 ## 命令行启动
 
