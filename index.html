@@ -116,6 +116,7 @@
       padding: 10px 16px;
     }
     .nav-title { font-size: 17px; font-weight: 600; letter-spacing: -.2px; }
+    .nav-title { flex-shrink: 0; white-space: nowrap; }
     main {
       width: min(1120px, 100%); margin: 0 auto;
       padding: 14px 16px calc(48px + env(safe-area-inset-bottom));
@@ -1124,14 +1125,15 @@
     .pin-card p {
       margin: 0; font-size: 14px; color: var(--secondary); line-height: 1.45;
     }
-    .pin-card input[type="password"] {
+    .pin-card .account-fields input {
       width: 100%; min-height: 48px; padding: 12px 14px;
       border-radius: 12px; border: .5px solid var(--separator);
       background: var(--bg); color: var(--label);
-      font-size: 17px; letter-spacing: 2px; text-align: center;
+      font-size: 17px; text-align: center;
       outline: none;
     }
-    .pin-card input[type="password"]:focus {
+    .pin-card input[type="password"] { letter-spacing: 2px; }
+    .pin-card .account-fields input:focus {
       border-color: var(--tint);
       box-shadow: 0 0 0 3px var(--tint-fill);
     }
@@ -1332,6 +1334,30 @@
       .protect-pill .protect-long { display: none; }
       .protect-pill .protect-short { display: inline; }
     }
+    .folder-toolbar { display:flex; align-items:center; gap:8px; margin:0; }
+    .folder-tabs { display:inline-flex; padding:3px; border-radius:10px; background:var(--track); }
+    .folder-tabs button { border:0; border-radius:8px; padding:8px 14px; min-height:38px; background:transparent; color:var(--secondary); font:inherit; font-weight:600; cursor:pointer; }
+    .folder-tabs button[aria-pressed="true"] { background:var(--card); color:var(--label); box-shadow:0 1px 4px rgba(0,0,0,.12); }
+    .breadcrumbs { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:0; min-height:32px; color:var(--secondary); }
+    .breadcrumbs button { border:0; background:none; color:var(--tint); font:inherit; cursor:pointer; padding:5px 2px; }
+    .breadcrumbs [aria-current="page"] { color:var(--label); font-weight:600; }
+    #zoneTransfer .section-header { flex-wrap:wrap; gap:8px; }
+    .directory-actions { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+    .directory-access { color:var(--secondary); font-size:12px; }
+    .folder-row { display:flex; align-items:center; gap:10px; padding:12px 20px; border-bottom:.5px solid var(--separator); }
+    .folder-row .folder-name { flex:1; min-width:0; overflow-wrap:anywhere; cursor:pointer; border:0; background:none; color:var(--label); text-align:left; font:inherit; }
+    .folder-group-label { padding:12px 20px 6px; color:var(--secondary); font-size:12px; font-weight:600; }
+    .account-fields { display:grid; gap:10px; }
+    .account-fields input { width:100%; }
+    .folder-dialog { border:0; border-radius:12px; background:var(--card); color:var(--label); padding:22px; width:min(420px, calc(100% - 32px)); }
+    .folder-dialog::backdrop { background:rgba(0,0,0,.45); }
+    .folder-dialog label { display:block; margin:10px 0; }
+    .folder-dialog input[type=text], .folder-dialog select { width:100%; padding:8px; font:inherit; }
+    .folder-dialog .dialog-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }
+    #shareUsers { max-height:180px; overflow:auto; }
+    #folderDialog [hidden], #pinForm [hidden], #accountLogout[hidden], #newFolder[hidden],
+    #uploadCard[hidden], #batchDelete[hidden], .file-actions [hidden] { display:none !important; }
+    #protectPill { display:none !important; }
   </style>
 </head>
 <body>
@@ -1350,10 +1376,11 @@
     <div class="nav-inner">
       <div class="nav-title">局域网传输</div>
       <div class="nav-actions">
+        <button type="button" class="presence-pill" id="accountLogout" hidden>退出</button>
         <button type="button" class="presence-pill is-solo" id="presencePill"
                 aria-haspopup="dialog" aria-controls="presenceDrawer" aria-expanded="false"
                 title="查看此刻在线的设备"><span class="presence-dot" aria-hidden="true"></span><span id="presencePillText">本机</span></button>
-        <button type="button" class="presence-pill protect-pill" id="protectPill"
+        <button type="button" hidden class="presence-pill protect-pill" id="protectPill"
                 aria-haspopup="dialog" aria-controls="protectDrawer" aria-expanded="false"
                 title="访问保护"><span class="protect-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><span id="protectPillText"><span class="protect-long">保护 · 关</span><span class="protect-short">关</span></span></button>
         <button type="button" class="presence-pill qr-pill" id="qrPill"
@@ -1376,12 +1403,13 @@
   <div class="pin-gate" id="pinGate" hidden role="dialog" aria-modal="true" aria-labelledby="pinGateTitle">
     <form class="pin-card" id="pinForm" autocomplete="off">
       <div class="pin-lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
-      <h2 id="pinGateTitle">输入访问口令</h2>
-      <p>此服务已启用口令保护。输入口令后即可传输文件与同步文本。</p>
+      <h2 id="pinGateTitle">设置昵称</h2>
       <p class="pin-hint" id="pinGateHint"></p>
-      <input type="password" id="pinInput" name="pin" inputmode="numeric" autocomplete="current-password" placeholder="访问口令" aria-label="访问口令" required>
+      <div class="account-fields"><input type="text" id="accountNickname" autocomplete="nickname" placeholder="昵称" aria-label="昵称" maxlength="16" required><input type="password" id="pinInput" hidden></div>
       <p class="pin-error" id="pinError" aria-live="polite"></p>
-      <button class="btn btn-filled" id="pinSubmit" type="submit">进入</button>
+      <button class="btn btn-filled" id="pinSubmit" type="submit">保存</button>
+      <button class="link-btn" id="profileCancel" type="button" hidden>取消</button>
+      <button class="link-btn" id="accountMode" type="button" hidden>注册账号</button>
     </form>
   </div>
 
@@ -1399,6 +1427,13 @@
           <span class="guest-banner-lock" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>
           <span class="guest-banner-text">访客只读：可浏览、预览与下载；上传与删除需主人口令。</span>
         </div>
+        <div class="folder-toolbar" role="group" aria-label="文件位置">
+          <div class="folder-tabs">
+            <button type="button" id="publicRoot" aria-pressed="true">公共区</button>
+            <button type="button" id="folderHome" aria-pressed="false">个人与共享</button>
+          </div>
+        </div>
+        <nav class="breadcrumbs" id="breadcrumbs" aria-label="当前位置"></nav>
         <div class="card guest-readonly-surface" id="uploadCard">
           <div class="card-body">
             <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-label="拖文件到这里，或点此选择">
@@ -1454,7 +1489,11 @@
               </label>
               <div class="section-title">文件<span class="section-count" id="fileCount" hidden></span></div>
             </div>
-            <button class="btn btn-tinted" id="refreshButton" type="button">刷新</button>
+            <div class="directory-actions">
+              <span class="directory-access" id="directoryAccess" hidden>只读</span>
+              <button class="btn btn-tinted" type="button" id="newFolder">＋ 新建文件夹</button>
+              <button class="btn btn-tinted" id="refreshButton" type="button">刷新</button>
+            </div>
           </div>
           <div class="card">
             <div class="batch-bar" id="batchBar" hidden>
@@ -1515,6 +1554,7 @@
     </section>
     </div><!-- /.panels -->
   </main>
+  <dialog class="folder-dialog" id="folderDialog"><form id="folderForm"><h2 id="folderDialogTitle">文件夹</h2><p id="folderLocation"></p><label>名称<input type="text" id="folderName" required></label><label id="visibilityLabel">可见性<select id="folderVisibility"><option value="private">私有</option><option value="public">公开</option><option value="shared">指定用户</option></select></label><div id="shareUsers"></div><p id="folderError" role="alert"></p><div class="dialog-actions"><button class="btn btn-tinted" type="button" id="folderCancel">取消</button><button class="btn btn-filled" type="submit">保存</button></div></form></dialog>
 
   <div class="preview-overlay" id="previewOverlay" hidden>
     <div class="preview-card" role="dialog" aria-modal="true">
@@ -1771,6 +1811,7 @@
     }
     /* 上传名：文件夹来源用相对路径，其它（单文件选择/拖放/粘贴）仍只用文件名 */
     function uploadNameOf(file) {
+      if (file && file.__uploadPath) return file.__uploadPath;
       if (file && file.__relPath) return sanitizeRelPath(file.__relPath);
       return sanitizeUploadName(file.name);
     }
@@ -1979,14 +2020,187 @@
       });
     }
 
+    let currentDirectory = '';
+    let folderHomeVisible = false;
+    let currentFolders = [];
+    let currentDirectories = [];
+    let currentUser = null;
+    let currentCanWrite = true;
+    let folderEdit = null;
+    let folderDialogRequestId = 0;
+
+    async function folderRequest(url, method, body) {
+      const response = await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(data.message || `HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+    function navigateDirectory(path, home = false) {
+      folderDialogRequestId += 1;
+      const defaultRoot = currentFolders.find(folder => folder.isDefaultRoot);
+      currentDirectory = home && defaultRoot ? defaultRoot.path : path;
+      folderHomeVisible = home;
+      currentCanWrite = false;
+      document.getElementById('uploadCard').hidden = true;
+      document.getElementById('newFolder').hidden = true;
+      document.getElementById('directoryAccess').hidden = true;
+      selectedFiles.clear();
+      listedFileNames = [];
+      writableFiles.clear();
+      elements.count.hidden = true;
+      updateBatchBar();
+      lastFilesKey = null;
+      renderNavigation();
+      elements.list.replaceChildren(makeMessage('正在加载…', 'empty'));
+      fetchFiles();
+    }
+    function renderNavigation() {
+      const nav = document.getElementById('breadcrumbs');
+      nav.replaceChildren();
+      const personal = folderHomeVisible || currentDirectory.startsWith('.personal/');
+      document.getElementById('publicRoot').setAttribute('aria-pressed', String(!personal));
+      document.getElementById('folderHome').setAttribute('aria-pressed', String(personal));
+      const add = (label, path, home) => {
+        const button = document.createElement('button');
+        button.type = 'button'; button.textContent = label;
+        button.addEventListener('click', () => navigateDirectory(path, home));
+        if (nav.childNodes.length) nav.append(document.createTextNode(' / '));
+        nav.append(button);
+      };
+      if (folderHomeVisible) { add('个人与共享', '', true); nav.lastChild.setAttribute('aria-current', 'page'); return; }
+      const top = currentFolders.find(f => currentDirectory === f.path || currentDirectory.startsWith(f.path + '/'));
+      if (top) {
+        add('个人与共享', '', true);
+        if (!top.isDefaultRoot) add(top.name, top.path, false);
+        let path = top.path;
+        for (const part of currentDirectory.slice(top.path.length).split('/').filter(Boolean)) {
+          path += '/' + part; add(part, path, false);
+        }
+      } else {
+        add('公共区', '', false);
+        let path = '';
+        for (const part of currentDirectory.split('/').filter(Boolean)) {
+          path = path ? path + '/' + part : part; add(part, path, false);
+        }
+      }
+      if (nav.lastChild) nav.lastChild.setAttribute('aria-current', 'page');
+    }
+    function folderRow(folder, topLevel) {
+      const row = document.createElement('div'); row.className = 'folder-row';
+      const name = document.createElement('button'); name.type = 'button'; name.className = 'folder-name';
+      name.textContent = '📁 ' + folder.name + (topLevel ? ` · ${folder.canWrite ? '我创建的' : `${folder.ownerName} (${folder.ownerIp || '未知 IP'}) 共享`} · ${ {private:'私有', public:'公开', shared:'指定用户'}[folder.visibility] || ''}` : '');
+      name.addEventListener('click', () => navigateDirectory(folder.path)); row.append(name);
+      if (folder.canWrite) {
+        const edit = actionButton(topLevel ? '设置' : '重命名', 'btn-tinted', () => openFolderDialog(folder, topLevel));
+        const del = actionButton('删除', 'btn-red', async () => {
+          if (!confirm(`删除文件夹“${folder.name}”及其中全部内容？`)) return;
+          try { await folderRequest(topLevel ? `/api/folders?id=${encodeURIComponent(folder.id)}` : `/api/directories?path=${encodeURIComponent(folder.path)}`, 'DELETE'); fetchFiles(); }
+          catch (error) { showToast(error.message); }
+        });
+        row.append(edit, del);
+      }
+      return row;
+    }
+    async function openFolderDialog(folder, topLevel) {
+      const requestId = ++folderDialogRequestId;
+      const targetDirectory = currentDirectory;
+      const location = Array.from(document.querySelectorAll('#breadcrumbs button'), button => button.textContent).join(' / ');
+      let availableUsers = [];
+      if (topLevel) {
+        try {
+          const data = await folderRequest('/api/users', 'GET');
+          if (requestId !== folderDialogRequestId) return;
+          availableUsers = data.users || [];
+        } catch (error) {
+          if (requestId === folderDialogRequestId) showToast(error.message);
+          return;
+        }
+      }
+      folderEdit = {folder, topLevel, targetDirectory};
+      document.getElementById('folderName').value = folder ? folder.name : '';
+      document.getElementById('folderDialogTitle').textContent = folder ? '编辑文件夹' : (topLevel ? '新建个人文件夹' : '新建文件夹');
+      document.getElementById('folderLocation').textContent = folder ? '' : '位置：' + location;
+      document.getElementById('visibilityLabel').hidden = !topLevel;
+      document.getElementById('folderVisibility').value = folder ? folder.visibility : 'private';
+      document.getElementById('folderError').textContent = '';
+      const users = document.getElementById('shareUsers'); users.replaceChildren();
+      for (const user of availableUsers) {
+        if (currentUser && user.id === currentUser.id) continue;
+        const label = document.createElement('label'); const check = document.createElement('input');
+        check.type = 'checkbox'; check.value = user.id; check.checked = !!(folder && (folder.sharedWith || []).includes(user.id));
+        label.append(check, document.createTextNode(` ${user.nickname} (${user.ip || '未知 IP'})`)); users.append(label);
+      }
+      users.hidden = !topLevel || document.getElementById('folderVisibility').value !== 'shared';
+      document.getElementById('folderDialog').showModal();
+    }
+    document.getElementById('folderVisibility').addEventListener('change', e => { document.getElementById('shareUsers').hidden = e.target.value !== 'shared'; });
+    document.getElementById('folderCancel').addEventListener('click', () => document.getElementById('folderDialog').close());
+    document.getElementById('folderForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const {folder, topLevel, targetDirectory} = folderEdit;
+      const name = document.getElementById('folderName').value.trim();
+      const body = topLevel ? {name, visibility: document.getElementById('folderVisibility').value, sharedWith: Array.from(document.querySelectorAll('#shareUsers input:checked'), input => input.value)} : {name, path: folder ? folder.path : targetDirectory};
+      if (folder && topLevel) body.id = folder.id;
+      try {
+        await folderRequest(topLevel ? '/api/folders' : '/api/directories', folder ? 'PATCH' : 'POST', body);
+        document.getElementById('folderDialog').close(); fetchFiles();
+      } catch (error) { document.getElementById('folderError').textContent = error.message; }
+    });
+    document.getElementById('publicRoot').addEventListener('click', () => navigateDirectory(''));
+    document.getElementById('folderHome').addEventListener('click', () => navigateDirectory('', true));
+    document.getElementById('newFolder').addEventListener('click', () => openFolderDialog(null, folderHomeVisible));
+
     async function fetchFiles() {
       const requestId = ++filesRequestId;
+      const home = folderHomeVisible;
+      let path = currentDirectory;
       try {
-        const response = await fetch('/api/files', {cache: 'no-store'});
+        const [response, folderResponse] = await Promise.all([
+          fetch('/api/files', {cache: 'no-store'}), fetch('/api/folders', {cache: 'no-store'})
+        ]);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
+        const folderData = await folderResponse.json().catch(() => ({}));
+        if (!folderResponse.ok) throw new Error(folderData.message || `无法读取文件夹列表（HTTP ${folderResponse.status}）`);
+        const folders = folderData.folders || [];
         if (requestId !== filesRequestId) return;
-        const files = Array.isArray(data) ? data : ((data && data.files) || []);
+        if (home) {
+          const defaultRoot = folders.find(folder => folder.isDefaultRoot);
+          if (!defaultRoot) throw new Error('无法读取个人根目录，请重启服务');
+          path = defaultRoot.path;
+        }
+        const directoryResponse = await fetch('/api/directories?path=' + encodeURIComponent(path), {cache: 'no-store'});
+        const directoryData = await directoryResponse.json().catch(() => ({}));
+        if (requestId !== filesRequestId) return;
+        if (!directoryResponse.ok) {
+          const message = directoryData.message || `无法读取目录（HTTP ${directoryResponse.status}）`;
+          const unavailable = directoryResponse.status === 403 || directoryResponse.status === 404
+            || (directoryResponse.status === 400 && message === '目录不存在');
+          if (!home && path && unavailable) {
+            currentFolders = folders;
+            showToast(message);
+            navigateDirectory('', path.startsWith('.personal/'));
+            return;
+          }
+          throw new Error(message);
+        }
+        currentDirectory = path;
+        currentFolders = folders;
+        currentDirectories = directoryData.directories || [];
+        const allFiles = Array.isArray(data) ? data : ((data && data.files) || []);
+        const prefix = currentDirectory ? currentDirectory + '/' : '';
+        const files = allFiles.filter(file => file.name.startsWith(prefix) && !file.name.slice(prefix.length).includes('/'));
+        const top = currentFolders.find(f => currentDirectory === f.path || currentDirectory.startsWith(f.path + '/'));
+        currentCanWrite = folderHomeVisible || !top || !!top.canWrite;
+        document.getElementById('uploadCard').hidden = !currentCanWrite;
+        document.getElementById('newFolder').hidden = !currentCanWrite;
+        document.getElementById('newFolder').textContent = folderHomeVisible ? '＋ 新建个人文件夹' : '＋ 新建文件夹';
+        document.getElementById('directoryAccess').hidden = folderHomeVisible || currentCanWrite;
+        renderNavigation();
         const epoch = Array.isArray(data) ? null : (data && data.filesEpoch);
         const latestName = Array.isArray(data) ? null : (data && data.latestName);
         renderFiles(files);
@@ -2101,6 +2315,7 @@
     let lastFilesKey = null;
     const selectedFiles = new Set(); /* 勾选的文件名集合；选择变化不触发列表全量重建 */
     let listedFileNames = [];
+    let writableFiles = new Set();
 
     function updateBatchBar() {
       const n = selectedFiles.size;
@@ -2123,34 +2338,44 @@
       if (elements.batchDownload) {
         elements.batchDownload.textContent = n >= 2 ? '打包下载' : '下载选中';
       }
+      elements.batchDelete.hidden = [...selectedFiles].some(name => !writableFiles.has(name));
     }
 
     function renderFiles(files) {
       /* 幂等渲染：内容没变就直接跳过。多文件上传时每传完一个都会
          fetchFiles 一次，幂等避免对未变化列表做 O(N) 的 DOM 全量重建。
          勾选状态由 selectedFiles + updateBatchBar 单独维护，不依赖本函数。 */
-      const key = JSON.stringify(files);
+      const key = JSON.stringify([files, currentDirectories, currentFolders, folderHomeVisible, currentDirectory]);
       if (key === lastFilesKey && !elements.list.querySelector('.empty, .error')) {
         updateBatchBar();
         return;
       }
       lastFilesKey = key;
       elements.list.replaceChildren();
+      const topFolders = folderHomeVisible ? currentFolders.filter(folder => !folder.isDefaultRoot) : [];
+      if (topFolders.length) {
+        elements.list.append(makeMessage('个人文件夹与共享', 'folder-group-label'));
+        topFolders.forEach(folder => elements.list.append(folderRow(folder, true)));
+        if (currentDirectories.length || files.length) elements.list.append(makeMessage('我的文件', 'folder-group-label'));
+      }
+      currentDirectories.forEach(folder => elements.list.append(folderRow(folder, false)));
       sharedNames = new Map((files || []).map(f => [f.name, f.size]));
       listedFileNames = (files || []).map(f => f.name);
+      writableFiles = new Set((files || []).filter(f => f.canWrite !== false).map(f => f.name));
       /* 列表变化时剔除已不存在的勾选 */
       for (const name of [...selectedFiles]) {
         if (!sharedNames.has(name)) selectedFiles.delete(name);
       }
-      if (!files.length) {
+      if (!files.length && !currentDirectories.length && !topFolders.length) {
         elements.count.hidden = true;
-        elements.list.append(makeMessage('暂无文件，先上传一个试试', 'empty'));
+        const message = currentCanWrite ? '此文件夹为空' : '此文件夹为空（只读）';
+        elements.list.append(makeMessage(message, 'empty'));
         updateBatchBar();
         if (typeof syncGuestWriteControls === 'function') syncGuestWriteControls(isGuestRole());
         return;
       }
       elements.count.hidden = false;
-      elements.count.textContent = `${files.length}`;
+      elements.count.textContent = `${files.length + currentDirectories.length + topFolders.length}`;
 
       for (const file of files) {
         const item = document.createElement('div');
@@ -2159,7 +2384,7 @@
 
         const checkWrap = document.createElement('label');
         checkWrap.className = 'file-check';
-        checkWrap.setAttribute('aria-label', `选择 ${file.name}`);
+        checkWrap.setAttribute('aria-label', `选择 ${baseNameOf(file.name)}`);
         const check = document.createElement('input');
         check.type = 'checkbox';
         check.className = 'file-check-input';
@@ -2181,23 +2406,24 @@
         info.className = 'file-info';
         const name = document.createElement('span');
         name.className = 'file-name';
-        name.title = file.name;
+        name.title = baseNameOf(file.name);
         name.setAttribute('role', 'button');
-        name.setAttribute('aria-label', file.name);
-        const lastDot = file.name.lastIndexOf('.');
-        const hasExt = lastDot > 0 && lastDot < file.name.length - 1
-          && file.name.length - lastDot <= 12
-          && !file.name.slice(lastDot + 1).includes(' ');
+        name.setAttribute('aria-label', baseNameOf(file.name));
+        const displayName = baseNameOf(file.name);
+        const lastDot = displayName.lastIndexOf('.');
+        const hasExt = lastDot > 0 && lastDot < displayName.length - 1
+          && displayName.length - lastDot <= 12
+          && !displayName.slice(lastDot + 1).includes(' ');
         const base = document.createElement('span');
         base.className = 'file-name-base';
         const ext = document.createElement('span');
         ext.className = 'file-name-ext';
         if (hasExt) {
-          base.textContent = file.name.slice(0, lastDot);
-          ext.textContent = file.name.slice(lastDot);
+          base.textContent = displayName.slice(0, lastDot);
+          ext.textContent = displayName.slice(lastDot);
           name.append(base, ext);
         } else {
-          base.textContent = file.name;
+          base.textContent = displayName;
           name.append(base);
         }
         name.addEventListener('click', () => openPreview(file));
@@ -2216,6 +2442,7 @@
         download.dataset.dlName = file.name;
         download.textContent = dlLabel(file.name);
         const delBtn = actionButton('删除', 'btn-red btn-row-delete', () => deleteFile(file.name));
+        delBtn.hidden = file.canWrite === false;
         if (isGuestRole()) setGuestWriteControl(delBtn, true, GUEST_REASON.delete);
 
         /* 次要操作收进「⋯」：预览 + 删除常驻菜单；窄屏行内删除由 CSS 隐藏，
@@ -2246,6 +2473,7 @@
         deleteItem.setAttribute('role', 'menuitem');
         deleteItem.className = 'menu-danger';
         deleteItem.textContent = '删除';
+        deleteItem.hidden = file.canWrite === false;
         if (isGuestRole()) setGuestWriteControl(deleteItem, true, GUEST_REASON.delete);
         deleteItem.addEventListener('click', event => {
           event.stopPropagation();
@@ -2313,7 +2541,7 @@
     }
 
     function resumeKey(file) {
-      return `${RESUME_PREFIX}${file.name}|${file.size}|${file.lastModified}`;
+      return `${RESUME_PREFIX}${currentUser ? currentUser.id : ''}:${file.name}|${file.size}|${file.lastModified}`;
     }
     function getResumeSession(file) {
       try { return localStorage.getItem(resumeKey(file)); } catch (_) { return null; }
@@ -2333,7 +2561,7 @@
     const TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
     const tabSessionIds = new Set();   // 本标签 init 拿到过的 sessionId
     function uploadLockKey(file) {
-      return `${UPLOAD_LOCK_PREFIX}${file.name}|${file.size}|${file.lastModified}`;
+      return `${UPLOAD_LOCK_PREFIX}${currentUser ? currentUser.id : ''}:${file.name}|${file.size}|${file.lastModified}`;
     }
     function readUploadLock(file) {
       try { return JSON.parse(localStorage.getItem(uploadLockKey(file)) || 'null'); }
@@ -2376,7 +2604,7 @@
       try {
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
-          if (k && k.startsWith(RESUME_PREFIX)) out.push(k);
+          if (k && k.startsWith(`${RESUME_PREFIX}${currentUser ? currentUser.id : ''}:`)) out.push(k);
         }
       } catch (_) {}
       return out;
@@ -2403,7 +2631,7 @@
       const hint = document.getElementById('resumeHint');
       if (!keys.length) { hint.hidden = true; return; }
       const items = keys.map(k => {
-        const [name, size] = k.slice(RESUME_PREFIX.length).split('|');
+        const [name, size] = k.slice(`${RESUME_PREFIX}${currentUser ? currentUser.id : ''}:`.length).split('|');
         return `<li>${escapeHtml(name)} · ${formatSize(Number(size) || 0)}</li>`;
       }).join('');
       hint.innerHTML =
@@ -2782,7 +3010,7 @@
     async function uploadOneImpl(job) {
       const file = job.file;
       const cleanName = uploadNameOf(file);
-      job.name = cleanName || file.__relPath || file.name;
+      job.name = file.__relPath || file.name;
       job.size = file.size;
       if (!cleanName || WIN_RESERVED.test(cleanName.split('/').pop())) {
         throw new Error(`${file.__relPath || file.name} 是 Windows 保留设备名或无效文件名/路径，无法上传`);
@@ -2790,7 +3018,7 @@
       assertNotCancelled(job);
       const resumeFile = {name: cleanName, size: file.size, lastModified: file.lastModified};
       const chunkSize = pickChunkSize(file.size);
-      const label = cleanName;
+      const label = job.name;
 
       // F3：同浏览器另一标签正在传同一文件 -> 不发 init，直接跳过，禁止双写
       if (foreignUploadLock(resumeFile)) throw uploadConflictError();
@@ -2837,7 +3065,7 @@
         job.percent = 100;
         paintProgress(label, 100, file.size, file.size, 'ok');
         renderTransferQueue();
-        showToast(`${cleanName} 已存在且内容相同，已跳过 · 再次上传该文件将强制覆盖`);
+        showToast(`${label} 已存在且内容相同，已跳过 · 再次上传该文件将强制覆盖`);
         return;
       }
 
@@ -2914,7 +3142,7 @@
       job.percent = 100;
       const totalSec = (Date.now() - startedAt) / 1000;
       window.__suppressNewFileToastOnce = true;
-      showToast(`${cleanName} 上传完成（${formatDuration(totalSec)}）`);
+      showToast(`${label} 上传完成（${formatDuration(totalSec)}）`);
     }
 
     function paintProgress(label, percent, loaded, size, cls) {
@@ -3021,14 +3249,18 @@
     function uploadFiles(fileList, opts) {
       const files = Array.from(fileList || []);
       if (!files.length) return;
+      if (!currentCanWrite) { showToast('当前位置不可上传'); return; }
       if (isGuestRole()) { showToast('访客只读，无法上传'); return; }
       const folder = !!(opts && opts.folder);
       for (const file of files) {
+        const relativeName = file.__relPath ? sanitizeRelPath(file.__relPath) : sanitizeUploadName(file.name);
+        if (!relativeName) { showToast(`无效文件路径：${file.name}`); continue; }
+        file.__uploadPath = currentDirectory ? currentDirectory + '/' + relativeName : relativeName;
         uploadJobSeq += 1;
         uploadQueue.push({
           id: uploadJobSeq,
           file,
-          name: uploadNameOf(file) || file.__relPath || file.name,
+          name: file.__relPath || file.name,
           size: file.size,
           status: 'waiting',
           percent: 0,
@@ -3149,8 +3381,9 @@
       if (!name) name = `粘贴-${pasteStamp()}`;
       // 重名避让：同名且大小不同 → 会覆盖掉已有文件，改名；
       // 同名同大小 → 保持原名，交给服务端秒传判定（内容一致就跳过）。
-      if (sharedNames.has(name) && sharedNames.get(name) !== file.size) {
-        name = uniquePasteName(name, sharedNames);
+      const currentNames = new Map([...sharedNames].map(([path, size]) => [baseNameOf(path), size]));
+      if (currentNames.has(name) && currentNames.get(name) !== file.size) {
+        name = uniquePasteName(name, currentNames);
       }
       const finalName = uniquePasteName(name, used);
       used.add(finalName);
@@ -3361,7 +3594,7 @@
       if (!dlDbPromise) {
         dlDbPromise = new Promise((resolve, reject) => {
           if (!window.indexedDB) { reject(new Error('IndexedDB 不可用')); return; }
-          const req = indexedDB.open(DL_DB_NAME, 1);
+          const req = indexedDB.open(`${DL_DB_NAME}-${currentUser ? currentUser.id : ''}`, 1);
           req.onupgradeneeded = () => {
             const db = req.result;
             if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
@@ -3681,7 +3914,7 @@
     });
 
     /* 启动清理：超过 7 天没动的续传缓存 */
-    (async () => {
+    async function cleanDownloadCache() {
       try {
         const db = await dlDb();
         const tx = db.transaction('meta', 'readonly');
@@ -3690,7 +3923,7 @@
         const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
         for (const m of req.result || []) if (!m.updatedAt || m.updatedAt < cutoff) await dlForget(m.name);
       } catch (_) {}
-    })();
+    }
 
     async function downloadSelectedFiles() {
       const names = [...selectedFiles];
@@ -3867,6 +4100,7 @@
     const CLIP_POLL_MS = 3000;
     let clipEtag = null;
     let clipKey = null;
+    let clipRequestId = 0;
     let clipTimer = null;
     let clipSending = false;   // 连按 Enter 时不重复提交同一段内容
 
@@ -4050,18 +4284,21 @@
     /* 只更新历史记录区。输入框永远不动——那里可能有用户正在敲的内容，
        而且发送成功后本来就会被清空，回填没有任何意义。 */
     async function fetchClipboard() {
+      const requestId = ++clipRequestId;
       try {
         const headers = {};
         if (clipEtag) headers['If-None-Match'] = clipEtag;
         const resp = await fetch('/api/clipboard', {cache: 'no-store', headers});
+        if (requestId !== clipRequestId) return;
         if (resp.status === 304) { setClipHint(); return; }
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         clipEtag = resp.headers.get('ETag');
         const data = await resp.json();
+        if (requestId !== clipRequestId) return;
         renderClipboard(data.items || []);
         setClipHint();
       } catch (e) {
-        setClipHint('刷新失败');
+        if (requestId === clipRequestId) setClipHint('刷新失败');
       }
     }
 
@@ -4135,10 +4372,14 @@
         if (document.hidden) return;
         fetchClipboard();
       }, CLIP_POLL_MS);
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) fetchClipboard();
-      });
     }
+    function stopClipPolling() {
+      if (clipTimer) clearInterval(clipTimer);
+      clipTimer = null;
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (clipTimer && !document.hidden) fetchClipboard();
+    });
 
     document.getElementById('clipboardSend').addEventListener('click', sendClipboard);
 
@@ -4151,7 +4392,6 @@
       event.preventDefault();
       sendClipboard();
     });
-    startClipPolling();
 
     // === 文件预览 ===
     const previewOverlay = document.getElementById('previewOverlay');
@@ -4356,6 +4596,43 @@
     const pinInput = document.getElementById('pinInput');
     const pinError = document.getElementById('pinError');
     let authRequired = false;
+    let editingProfile = false;
+    let retryBoot = false;
+    let accountReset = Promise.resolve();
+    async function resetAccountState() {
+      folderDialogRequestId += 1;
+      const folderDialog = document.getElementById('folderDialog');
+      if (folderDialog.open) folderDialog.close();
+      filesRequestId += 1;
+      clipRequestId += 1;
+      if (uploadQueue.length) cancelAllUploads();
+      for (const state of dlActive.values()) if (state.running) state.ctrl.abort();
+      while (queuePumpRunning) await new Promise(resolve => setTimeout(resolve, 50));
+      while ([...dlActive.values()].some(state => state.running)) await new Promise(resolve => setTimeout(resolve, 50));
+      dlActive.clear();
+      closePreview();
+      uploadQueue.length = 0; renderTransferQueue(); resetProgress();
+      forceUploadNames.clear(); tabSessionIds.clear(); selectedFiles.clear();
+      currentDirectory = ''; folderHomeVisible = false; currentFolders = []; currentDirectories = [];
+      currentCanWrite = true; lastFilesKey = null; lastFilesEpoch = null;
+      elements.list.replaceChildren(); clipEtag = null; clipKey = null;
+      document.getElementById('clipHistoryList').replaceChildren();
+      document.getElementById('clipboardInput').value = '';
+      if (dlDbPromise) dlDbPromise.then(db => db.close()).catch(() => {});
+      dlDbPromise = null;
+    }
+    const accountNickname = document.getElementById('accountNickname');
+    function openProfile() {
+      editingProfile = true;
+      document.getElementById('pinGateTitle').textContent = '修改昵称';
+      document.getElementById('profileCancel').hidden = false;
+      accountNickname.value = currentUser ? currentUser.nickname : '';
+      document.body.classList.add('pin-locked');
+      pinGate.hidden = false;
+      pinError.textContent = '';
+      accountNickname.focus(); accountNickname.select();
+    }
+    document.getElementById('profileCancel').addEventListener('click', () => { editingProfile = false; document.getElementById('profileCancel').hidden = true; hidePinGate(); });
     /* 访问保护 A：当前角色 owner|guest|none（none = 未启用口令或未登录）。
        契约：status { required, authenticated, role:"owner"|"guest"|"none", guestEnabled }；login {pin} → { ok, role }；
        logout POST /api/auth/logout。容错：缺 role 且已登录 → owner；缺 guestEnabled → false。
@@ -4702,14 +4979,19 @@
 
     function showPinGate(message) {
       authRequired = true;
+      const resetNeeded = currentUser && !document.body.classList.contains('pin-locked');
+      document.body.classList.add('pin-locked');
+      stopClipPolling();
+      if (resetNeeded) accountReset = resetAccountState().then(() => {
+        currentUser = null;
+      });
       if (typeof stopPresence === 'function') stopPresence();
       protectClose(true);
       if (currentRole !== 'none') applyRole('none', true);   // 会话过期：胶囊回「需口令」，访客限制随之解除到门禁层
-      document.body.classList.add('pin-locked');
       pinGate.hidden = false;
       if (message) pinError.textContent = message;
       else pinError.textContent = '';
-      setTimeout(() => { try { pinInput.focus(); pinInput.select(); } catch (_) {} }, 30);
+      setTimeout(() => { try { accountNickname.focus(); accountNickname.select(); } catch (_) {} }, 30);
     }
 
     function hidePinGate() {
@@ -4723,46 +5005,61 @@
       /* 首屏全部并行：fetchConfig 只影响分片参数（有内置默认值），
          不再 await 阻塞 files/clipboard 一个 RTT。 */
       fetchConfig();
+      cleanDownloadCache();
       pruneResumeEntries();
       fetchFiles();
       startFilesPolling();
       fetchClipboard();
+      startClipPolling();
       startPresence();
     }
 
     async function checkAuthAndBoot() {
+      retryBoot = false;
+      accountNickname.hidden = false;
+      accountNickname.required = true;
+      document.getElementById('pinSubmit').textContent = '保存';
+      document.getElementById('pinSubmit').disabled = false;
+      document.getElementById('pinGateHint').textContent = '';
       try {
         const r = await fetch('/api/auth/status', { credentials: 'same-origin' });
         if (!r.ok) throw new Error('status ' + r.status);
         const data = await r.json();
-        guestEnabled = !!data.guestEnabled;
-        applyRole(data.role || (data.required && data.authenticated ? 'owner' : 'none'), !!data.required);
-        if (data.required && !data.authenticated) {
+        authRequired = true;
+        applyRole('none', false);
+        if (!data || data.enabled !== false || !data.user || typeof data.user.ip !== 'string') {
           showPinGate();
+          document.getElementById('pinGateHint').textContent = '当前服务仍是旧版，请关闭旧服务并重新启动，或访问新版服务的地址';
+          document.getElementById('pinSubmit').disabled = true;
+          accountNickname.hidden = true;
+          accountNickname.required = false;
           return;
         }
-        if (data.required) authRequired = true;
+        currentUser = data.user;
         hidePinGate();
         startAppData();
       } catch (_) {
-        // 旧服务无口令接口时按无口令处理
-        applyRole('none', false);
-        hidePinGate();
-        startAppData();
+        retryBoot = true;
+        showPinGate('无法连接服务，请重试');
+        accountNickname.hidden = true;
+        accountNickname.required = false;
+        document.getElementById('pinSubmit').textContent = '重试';
       }
     }
 
     async function submitPin(event) {
       if (event) event.preventDefault();
-      const pin = pinInput.value;
+      if (retryBoot) { await checkAuthAndBoot(); return; }
+      await accountReset;
+      const nickname = accountNickname.value.trim();
       pinError.textContent = '';
       pinForm.querySelector('button').disabled = true;
       try {
-        const r = await fetch('/api/auth/login', {
-          method: 'POST',
+        const r = await fetch(editingProfile ? '/api/profile' : '/api/auth/register', {
+          method: editingProfile ? 'PATCH' : 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pin }),
+          body: JSON.stringify({nickname}),
         });
         let data = null;
         try { data = await r.json(); } catch (_) {}
@@ -4771,14 +5068,17 @@
           return;
         }
         if (!r.ok) {
-          pinError.textContent = (data && data.message) || '口令错误';
-          pinInput.select();
+          pinError.textContent = (data && data.message) || '昵称无效';
+          accountNickname.select();
           return;
         }
-        applyRole((data && data.role) || 'owner', true);
-        if (currentRole === 'guest') showToast('已以访客身份进入（只读）');
+        currentUser = data && data.user;
+        const wasEditing = editingProfile;
+        editingProfile = false;
+        document.getElementById('profileCancel').hidden = true;
         hidePinGate();
-        startAppData();
+        if (wasEditing) { presenceHeartbeat(); showToast('昵称已更新'); }
+        else startAppData();
       } catch (_) {
         pinError.textContent = '网络异常，请重试';
       } finally {
@@ -4798,11 +5098,11 @@
         const url = typeof input === 'string' ? input : (input && input.url) || '';
         if (
           authRequired
-          && (response.status === 401 || (response.status === 403 && !isGuestRole()))
+          && response.status === 401
           && url
           && !String(url).includes('/api/auth/')
         ) {
-          showPinGate('登录已过期，请重新输入口令');
+          showPinGate('设备身份不可用，请刷新页面重试');
         }
       } catch (_) {}
       return response;
@@ -4898,7 +5198,7 @@
       return `hsl(${PRESENCE_HUES[h % PRESENCE_HUES.length]} 70% 55%)`;
     }
     function presenceSelfRow() {
-      return { id: presenceState.selfId || presenceClientId(), nickname: presenceLocalNick() || presenceDefaultNick(),
+      return { id: presenceState.selfId || presenceClientId(), nickname: (currentUser && currentUser.nickname) || presenceDefaultNick(),
                lastSeen: Date.now(), isSelf: true };
     }
     function presenceApply(data) {
@@ -4940,8 +5240,7 @@
     }
     async function presenceHeartbeat(extra) {
       const body = { id: presenceClientId() };
-      const nick = presenceLocalNick();
-      if (nick) body.nickname = nick;
+      if (currentUser) body.nickname = currentUser.nickname;
       Object.assign(body, extra || {});
       try {
         presenceApply(await presenceRequest('POST', body));
@@ -4977,7 +5276,7 @@
         line.className = 'presence-name-line';
         const name = document.createElement('span');
         name.className = 'presence-name';
-        name.textContent = (p.isSelf ? (presenceLocalNick() || p.nickname) : p.nickname) || '未命名设备';
+        name.textContent = (p.isSelf && currentUser ? currentUser.nickname : p.nickname) || '未命名设备';
         name.title = name.textContent;
         line.appendChild(name);
         if (p.isSelf) {
@@ -4993,7 +5292,7 @@
         if (p.isSelf) {
           const btn = document.createElement('button');
           btn.type = 'button'; btn.className = 'presence-rename'; btn.textContent = '改昵称';
-          btn.addEventListener('click', () => presenceStartEdit(li, name));
+          btn.addEventListener('click', () => { presenceClose(); openProfile(); });
           li.appendChild(btn);
         }
         list.appendChild(li);
