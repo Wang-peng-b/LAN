@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import errno
+import functools
 import gzip
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -16,6 +18,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import sys
 import threading
 import time
@@ -91,7 +94,7 @@ UPLOAD_ACTIVE_WINDOW = 30.0
 
 # Optional access PIN (Feature D)
 AUTH_COOKIE = "lan_transfer_session"
-AUTH_SESSION_TTL = 7 * 24 * 3600
+AUTH_SESSION_TTL = 30 * 24 * 3600
 AUTH_FAIL_LIMIT = 5
 AUTH_FAIL_WINDOW = 60
 # B 会话吊销：lastActive 刷新节流（秒）
@@ -103,6 +106,7 @@ AUTH_PUBLIC_PATHS = frozenset({
     "/api/config",
     "/api/auth/status",
     "/api/auth/login",
+    "/api/auth/register",
     "/api/auth/logout",
 })
 # 访问保护 A：guest 一律 403 的写路由（presence 单独按「是否本人」判定）
@@ -170,7 +174,7 @@ def validate_ipv4(value: str) -> str:
     return str(address)
 
 
-FALLBACK_PORTS = (8080, 8866, 9000, 9527, 18080, 8000)
+FALLBACK_PORTS = (6666,8080, 8866, 9000, 9527, 18080, 8000)
 
 
 def probe_port(host: str, port: int) -> str | None:
@@ -991,7 +995,7 @@ class UploadSession:
     """State for one in-flight resumable upload."""
 
     __slots__ = (
-        "id", "name", "size", "last_modified", "part", "meta", "lock", "last_active"
+        "id", "name", "size", "last_modified", "part", "meta", "lock", "last_active", "owner_id"
     )
 
     def __init__(
@@ -1001,8 +1005,10 @@ class UploadSession:
         size: int,
         last_modified: float | None,
         directory: Path,
+        owner_id: str | None = None,
     ) -> None:
         self.id = session_id
+        self.owner_id = owner_id
         self.name = name
         self.size = size
         self.last_modified = last_modified
@@ -1040,6 +1046,7 @@ class UploadSession:
             "size": self.size,
             "last_modified": self.last_modified,
             "created": time.time(),
+            "owner_id": self.owner_id,
         }
         self.meta.write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8"
@@ -1066,7 +1073,7 @@ def load_upload_sessions(directory: Path) -> dict[str, UploadSession]:
             meta.unlink(missing_ok=True)
             continue
         session = UploadSession(
-            session_id, name, size, data.get("last_modified"), directory
+            session_id, name, size, data.get("last_modified"), directory, data.get("owner_id")
         )
         if not session.part.is_file():
             session.discard()  # sidecar without data is worthless
@@ -1102,11 +1109,15 @@ def start_session_sweeper(server: LanFileServer, interval: int = 6 * 3600) -> No
         while True:
             time.sleep(interval)
             try:
-                removed = sweep_upload_sessions(server.uploads_dir)
+                with server._filesystem_lock:
+                    for session in list(server.upload_sessions.values()):
+                        if session.is_active(server.upload_active_window):
+                            session.meta.touch(exist_ok=True)
+                    removed = sweep_upload_sessions(server.uploads_dir)
+                    for session_id in removed:
+                        server.drop_session(session_id)
             except OSError:
                 continue
-            for session_id in removed:
-                server.drop_session(session_id)
             if removed:
                 print(
                     f"已清理 {len(removed)} 个超过 "
@@ -1116,7 +1127,7 @@ def start_session_sweeper(server: LanFileServer, interval: int = 6 * 3600) -> No
     threading.Thread(target=loop, daemon=True, name="upload-sweeper").start()
 
 
-def iter_shared_file_relpaths(shared_dir: Path) -> list[str]:
+def iter_shared_file_relpaths(shared_dir: Path, include_personal: bool = True) -> list[str]:
     """List relative POSIX paths of shareable files (same rules as /api/files)."""
     names: list[str] = []
     try:
@@ -1139,6 +1150,13 @@ def iter_shared_file_relpaths(shared_dir: Path) -> list[str]:
                 names.append(rel)
     except OSError:
         return names
+    personal = shared_dir / ".personal"
+    if include_personal and personal.is_dir() and not personal.is_symlink():
+        for folder in personal.iterdir():
+            if not is_valid_session_id(folder.name) or folder.is_symlink() or not folder.is_dir():
+                continue
+            for rel in iter_shared_file_relpaths(folder, include_personal=False):
+                names.append(f".personal/{folder.name}/{rel}")
     return names
 
 
@@ -1184,7 +1202,6 @@ def sweep_expired_shared_files(shared_dir: Path, ttl_days: int) -> list[str]:
         except OSError:
             continue
         drop_file_order(shared_dir, rel)
-        _prune_empty_parents(shared_dir, path)
         removed.append(rel)
     return removed
 
@@ -1204,9 +1221,10 @@ def start_file_ttl_sweeper(server: "LanFileServer", interval: int | None = None)
         while True:
             time.sleep(interval)
             try:
-                removed = sweep_expired_shared_files(
-                    server.shared_dir, server.file_ttl_days
-                )
+                with server._filesystem_lock:
+                    removed = sweep_expired_shared_files(
+                        server.shared_dir, server.file_ttl_days
+                    )
             except OSError:
                 continue
             if removed:
@@ -1264,6 +1282,24 @@ class LanFileServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, handler_class)
         self.shared_dir = shared_dir
+        self.personal_dir = shared_dir / ".personal"
+        if self.personal_dir.is_symlink():
+            raise ValueError("个人数据目录不能是符号链接")
+        self.personal_dir.mkdir(exist_ok=True)
+        self.state_path = self.personal_dir / "state.json"
+        if self.state_path.is_symlink():
+            raise ValueError("账号数据文件不能是符号链接")
+        self._state_lock = threading.RLock()
+        self._filesystem_lock = threading.RLock()
+        try:
+            self.account_state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            self.account_state = {"users": [], "sessions": {}, "folders": []}
+        if not isinstance(self.account_state, dict) or not isinstance(self.account_state.get("users"), list) or not isinstance(self.account_state.get("sessions"), dict) or not isinstance(self.account_state.get("folders"), list):
+            raise ValueError(f"账号数据文件格式无效：{self.state_path}")
+        self.account_state.setdefault("users", [])
+        self.account_state.setdefault("sessions", {})
+        self.account_state.setdefault("folders", [])
         self.advertised_ip = advertised_ip
         self.upload_chunk_size = upload_chunk_size
         self.max_upload_size = max_upload_size
@@ -1312,12 +1348,100 @@ class LanFileServer(ThreadingHTTPServer):
         if self.file_ttl_days > FILE_TTL_MAX_DAYS:
             self.file_ttl_days = FILE_TTL_MAX_DAYS
 
+    def save_account_state(self) -> None:
+        with self._state_lock:
+            temporary = self.personal_dir / (".state-" + uuid.uuid4().hex + ".tmp")
+            try:
+                with temporary.open("x", encoding="utf-8") as output:
+                    json.dump(self.account_state, output, ensure_ascii=False)
+                os.replace(temporary, self.state_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def ensure_default_folder(self, user_id: str) -> dict:
+        with self._state_lock:
+            folders = self.account_state["folders"]
+            folder = next((f for f in folders if f.get("ownerId") == user_id and f.get("isDefaultRoot") is True), None)
+            if folder is not None:
+                folder_id = folder["id"]
+                if isinstance(folder_id, str) and is_valid_session_id(folder_id):
+                    folder_dir = self.personal_dir / folder_id
+                    try:
+                        # Inspect the path itself so a dangling link is never treated as missing.
+                        folder_dir.lstat()
+                    except FileNotFoundError:
+                        try:
+                            folder_dir.mkdir()
+                        except FileExistsError:
+                            pass  # The listing still checks what now occupies this path.
+                return folder
+            folder = {
+                "id": uuid.uuid4().hex,
+                "name": "我的文件",
+                "ownerId": user_id,
+                "visibility": "private",
+                "sharedWith": [],
+                "isDefaultRoot": True,
+            }
+            (self.personal_dir / folder["id"]).mkdir()
+            folders.append(folder)
+            try:
+                self.save_account_state()
+            except Exception:
+                folders.remove(folder)
+                raise
+            return folder
+
+    def account_for_token(self, token: str | None) -> dict | None:
+        if not token:
+            return None
+        key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._state_lock:
+            session = self.account_state["sessions"].get(key)
+            if not session or session["expires"] < time.time():
+                return None
+            return next((u for u in self.account_state["users"] if u["id"] == session["userId"]), None)
+
+    def account_for_ip(self, ip: str, old_token: str | None = None) -> dict:
+        with self._state_lock:
+            users = self.account_state["users"]
+            user = next((item for item in users if item.get("ip") == ip), None)
+            if user is not None:
+                return user
+            old_user = self.account_for_token(old_token)
+            if old_user is not None and not old_user.get("ip"):
+                old_user["ip"] = ip
+                old_user["needsNickname"] = False
+                try:
+                    self.save_account_state()
+                except Exception:
+                    old_user.pop("ip", None)
+                    old_user.pop("needsNickname", None)
+                    raise
+                return old_user
+            user = {"id": uuid.uuid4().hex, "nickname": ip, "ip": ip, "needsNickname": True}
+            users.append(user)
+            try:
+                self.save_account_state()
+            except Exception:
+                users.remove(user)
+                raise
+            return user
+
+    def account_login(self, user: dict) -> str:
+        token = secrets.token_urlsafe(32)
+        key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._state_lock:
+            self.account_state["sessions"][key] = {"userId": user["id"], "expires": time.time() + AUTH_SESSION_TTL}
+            self.save_account_state()
+        return token
+
     def get_session(self, session_id: str) -> UploadSession | None:
         with self._upload_lock:
             return self.upload_sessions.get(session_id)
 
     def find_session_by_fingerprint(
-        self, name: str, size: int, last_modified: float | None
+        self, name: str, size: int, last_modified: float | None, owner_id: str
     ) -> UploadSession | None:
         """Unfinished session for the same file (name + size + lastModified).
 
@@ -1331,6 +1455,8 @@ class LanFileServer(ThreadingHTTPServer):
         with self._upload_lock:
             candidates = list(self.upload_sessions.values())
         for session in candidates:
+            if session.owner_id != owner_id:
+                continue
             if session.name != name or session.size != size:
                 continue
             a, b = session.last_modified, last_modified
@@ -1626,6 +1752,14 @@ def describe_request(method: str, target: str) -> str:
     return f"{method} {path}"
 
 
+def filesystem_operation(method):
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self.server._filesystem_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     server: LanFileServer
 
@@ -1840,6 +1974,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         data: object,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
+        if status == HTTPStatus.BAD_REQUEST and str(data.get("message", "")).startswith("无权访问"):
+            status = HTTPStatus.FORBIDDEN
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_bytes(status, body, "application/json; charset=utf-8", extra_headers)
 
@@ -1853,9 +1989,43 @@ class RequestHandler(BaseHTTPRequestHandler):
         return None
 
     def is_authenticated(self) -> bool:
-        if not self.server.access_pin:
-            return True
-        return self.server.validate_auth_token(self._session_token_from_cookie())
+        return self.current_user() is not None
+
+    def current_user(self) -> dict | None:
+        return self.server.account_for_ip(self.client_address[0], self._session_token_from_cookie())
+
+    @staticmethod
+    def public_user(user: dict) -> dict:
+        return {"id": user["id"], "nickname": user["nickname"], "ip": user.get("ip", ""), "needsNickname": bool(user.get("needsNickname", False))}
+
+    def checked_name(self, raw: str, write: bool = False) -> str:
+        name = unquote(raw)
+        if name.startswith(".personal/"):
+            parts = name.split("/")
+            if len(parts) < 2 or not is_valid_session_id(parts[1]):
+                raise ValueError("文件夹路径无效")
+            if len(parts) > 2:
+                safe_relpath("/".join(parts[2:]))
+            user = self.current_user()
+            with self.server._state_lock:
+                folder = next((f for f in self.server.account_state["folders"] if f["id"] == parts[1]), None)
+                allowed = bool(folder and user and (folder["ownerId"] == user["id"] or (not folder.get("isDefaultRoot") and not write and (folder["visibility"] == "public" or (folder["visibility"] == "shared" and user["id"] in folder["sharedWith"])))))
+            if not allowed:
+                raise ValueError("无权访问此文件夹")
+            base = (self.server.personal_dir / parts[1]).resolve()
+            if base.parent != self.server.personal_dir.resolve():
+                raise ValueError("文件夹路径无效")
+        else:
+            name = safe_relpath(name)
+            if any(part.startswith(".") for part in name.split("/")):
+                raise ValueError("不允许访问隐藏路径")
+            base = self.server.shared_dir.resolve()
+        target = (self.server.shared_dir / name).resolve()
+        if target != base and base not in target.parents:
+            raise ValueError("文件路径超出共享目录")
+        if not name.startswith(".personal/") and (target == self.server.personal_dir.resolve() or self.server.personal_dir.resolve() in target.parents):
+            raise ValueError("不允许访问个人存储")
+        return name
 
     def auth_role(self) -> str:
         """"owner" | "guest" | "none"。未设口令时人人等同 owner 权限，但 status 报 "none"。"""
@@ -1881,51 +2051,58 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def require_auth(self) -> bool:
         """Return True when the request may proceed; otherwise send 401."""
-        if not self.server.access_pin or self.is_authenticated():
+        if self.is_authenticated():
             return True
         self.fail(HTTPStatus.UNAUTHORIZED, "需要访问口令")
         return False
 
     def handle_auth_status(self) -> None:
-        required = bool(self.server.access_pin)
+        user = self.current_user()
         self.send_json(
             HTTPStatus.OK,
             {
-                "required": required,
-                "authenticated": (not required) or self.is_authenticated(),
-                "role": self.auth_role(),
-                "guestEnabled": bool(self.server.guest_pin),
+                "enabled": False, "required": False,
+                "authenticated": True, "role": "owner",
+                "guestEnabled": False,
+                "user": self.public_user(user),
             },
         )
 
     def handle_auth_login(self) -> None:
-        if not self.server.access_pin:
-            self.send_json(HTTPStatus.OK, {"ok": True, "required": False})
-            return
-        ip = self.client_address[0]
-        if self.server.is_auth_rate_limited(ip):
-            self.fail(HTTPStatus.TOO_MANY_REQUESTS, "尝试次数过多，请稍后再试")
-            return
+        self.drain_body()
+        self.send_json(HTTPStatus.OK, {"ok": True, "user": self.public_user(self.current_user())})
+
+    def handle_auth_register(self) -> None:
+        self.handle_profile()
+
+    def handle_profile(self) -> None:
         data = self.read_json_body()
         if data is None:
             return
-        pin = str(data.get("pin") if data.get("pin") is not None else "")
-        role = self.server.pin_role(pin)
-        if role is None:
-            self.server.record_auth_failure(ip)
-            self.fail(HTTPStatus.UNAUTHORIZED, "口令错误")
+        nickname = sanitize_nickname(data.get("nickname"))
+        if not nickname:
+            self.fail(HTTPStatus.BAD_REQUEST, "昵称不能为空（1–16 个字符）")
             return
-        self.server.clear_auth_failures(ip)
-        token = self.server.issue_auth_token(role, ip)
-        cookie = (
-            f"{AUTH_COOKIE}={token}; HttpOnly; Path=/; SameSite=Lax; "
-            f"Max-Age={AUTH_SESSION_TTL}"
-        )
-        self.send_json(HTTPStatus.OK, {"ok": True, "role": role}, {"Set-Cookie": cookie})
+        with self.server._state_lock:
+            user = self.current_user()
+            old_nickname = user["nickname"]
+            old_needs_nickname = user.get("needsNickname", False)
+            user["nickname"] = nickname
+            user["needsNickname"] = False
+            try:
+                self.server.save_account_state()
+            except Exception:
+                user["nickname"] = old_nickname
+                user["needsNickname"] = old_needs_nickname
+                raise
+        self.send_json(HTTPStatus.OK, {"ok": True, "user": self.public_user(user)})
 
     def handle_auth_logout(self) -> None:
         token = self._session_token_from_cookie()
-        self.server.revoke_auth_token(token)
+        if token:
+            with self.server._state_lock:
+                self.server.account_state["sessions"].pop(hashlib.sha256(token.encode()).hexdigest(), None)
+                self.server.save_account_state()
         # Drain optional body so keep-alive stays aligned
         self.drain_body()
         cookie = f"{AUTH_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"
@@ -2005,6 +2182,18 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path not in AUTH_PUBLIC_PATHS and not self.require_auth():
             return
 
+        if path == "/api/users":
+            with self.server._state_lock:
+                users = [self.public_user(u) for u in self.server.account_state["users"]]
+            self.send_json(HTTPStatus.OK, {"users": users})
+            return
+        if path == "/api/folders":
+            self.handle_folders("GET")
+            return
+        if path == "/api/directories":
+            self.handle_directories("GET", parse_qs(parsed.query))
+            return
+
         if path == "/api/files":
             self.handle_file_list()
             return
@@ -2057,11 +2246,21 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/auth/login":
             self.handle_auth_login()
             return
+        if path == "/api/auth/register":
+            self.handle_auth_register()
+            return
         if path == "/api/auth/logout":
             self.handle_auth_logout()
             return
 
         if path not in AUTH_PUBLIC_PATHS and not self.require_auth():
+            return
+
+        if path == "/api/folders":
+            self.handle_folders("POST")
+            return
+        if path == "/api/directories":
+            self.handle_directories("POST", parse_qs(parsed.query))
             return
 
         if path in GUEST_DENIED_POST and self.deny_guest():
@@ -2110,6 +2309,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path not in AUTH_PUBLIC_PATHS and not self.require_auth():
             return
+        if path == "/api/profile":
+            self.handle_profile()
+            return
+        if path == "/api/folders":
+            self.handle_folders("PATCH")
+            return
+        if path == "/api/directories":
+            self.handle_directories("PATCH", parse_qs(parsed.query))
+            return
         if path == "/api/presence":
             self.handle_presence_post(require_existing_id=True)
             return
@@ -2120,6 +2328,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path not in AUTH_PUBLIC_PATHS and not self.require_auth():
             return
+        if path == "/api/folders":
+            self.handle_folders("DELETE", parse_qs(parsed.query))
+            return
+        if path == "/api/directories":
+            self.handle_directories("DELETE", parse_qs(parsed.query))
+            return
         if path in GUEST_DENIED_DELETE and self.deny_guest():
             return
         if path == "/api/clipboard":
@@ -2129,6 +2343,137 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.handle_upload_abort(parse_qs(parsed.query))
             return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    @filesystem_operation
+    def handle_folders(self, method: str, query: dict | None = None) -> None:
+        user = self.current_user()
+        data = self.read_json_body() if method in {"POST", "PATCH"} else {}
+        if data is None:
+            return
+        with self.server._state_lock:
+            folders = self.server.account_state["folders"]
+            users = self.server.account_state["users"]
+            if method == "GET":
+                self.server.ensure_default_folder(user["id"])
+                result = []
+                for folder in folders:
+                    folder_id = folder["id"]
+                    if not isinstance(folder_id, str) or not is_valid_session_id(folder_id):
+                        continue
+                    folder_dir = self.server.personal_dir / folder_id
+                    try:
+                        folder_info = folder_dir.lstat()
+                    except (FileNotFoundError, NotADirectoryError):
+                        continue
+                    if (
+                        not stat.S_ISDIR(folder_info.st_mode)
+                        or getattr(folder_info, "st_reparse_tag", 0) == stat.IO_REPARSE_TAG_MOUNT_POINT
+                    ):
+                        continue
+                    owner = next((u for u in users if u["id"] == folder["ownerId"]), None)
+                    if folder["ownerId"] == user["id"] or (not folder.get("isDefaultRoot") and (folder["visibility"] == "public" or (folder["visibility"] == "shared" and user["id"] in folder["sharedWith"]))):
+                        result.append({**folder, "isDefaultRoot": bool(folder.get("isDefaultRoot")), "ownerName": owner["nickname"] if owner else "", "ownerIp": owner.get("ip", "") if owner else "", "path": ".personal/" + folder["id"], "canWrite": folder["ownerId"] == user["id"]})
+                self.send_json(HTTPStatus.OK, {"folders": result})
+                return
+            folder_id = str(data.get("id") or (query or {}).get("id", [""])[0])
+            folder = next((f for f in folders if f["id"] == folder_id), None)
+            if method != "POST" and (not folder or folder["ownerId"] != user["id"]):
+                self.send_json(HTTPStatus.FORBIDDEN, {"status": "error", "message": "无权管理此文件夹"})
+                return
+            if folder and folder.get("isDefaultRoot"):
+                self.send_json(HTTPStatus.FORBIDDEN, {"status": "error", "message": "默认个人目录不能修改或删除"})
+                return
+            if method == "DELETE":
+                prefix = ".personal/" + folder_id + "/"
+                if any(s.name.startswith(prefix) for s in self.server.upload_sessions.values()):
+                    self.send_json(HTTPStatus.CONFLICT, {"status": "error", "message": "文件夹包含未完成上传"})
+                    return
+                shutil.rmtree(self.server.personal_dir / folder_id, ignore_errors=False)
+                folders.remove(folder)
+                self.server.save_account_state()
+                self.send_json(HTTPStatus.OK, {"status": "success"})
+                return
+            name = str(data.get("name", folder["name"] if folder else "")).strip()
+            visibility = str(data.get("visibility", folder["visibility"] if folder else "private"))
+            shared = data.get("sharedWith", folder["sharedWith"] if folder else [])
+            try:
+                safe_filename(name)
+                if name.startswith(".") or visibility not in {"private", "public", "shared"} or not isinstance(shared, list) or any(not isinstance(x, str) or not any(u["id"] == x for u in users) for x in shared):
+                    raise ValueError("文件夹设置无效")
+                if any(f is not folder and f["ownerId"] == user["id"] and f["name"].casefold() == name.casefold() for f in folders):
+                    raise ValueError("文件夹名称已存在")
+            except ValueError as exc:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
+                return
+            if folder is None:
+                folder = {"id": uuid.uuid4().hex, "ownerId": user["id"]}
+                (self.server.personal_dir / folder["id"]).mkdir()
+                folders.append(folder)
+            folder.update({"name": name, "visibility": visibility, "sharedWith": list(dict.fromkeys(shared))})
+            self.server.save_account_state()
+            self.send_json(HTTPStatus.OK, {"status": "success", "folder": {**folder, "isDefaultRoot": False, "ownerName": user["nickname"], "ownerIp": user.get("ip", ""), "path": ".personal/" + folder["id"], "canWrite": True}})
+
+    @filesystem_operation
+    def handle_directories(self, method: str, query: dict) -> None:
+        data = self.read_json_body() if method in {"POST", "PATCH"} else {}
+        if data is None:
+            return
+        raw_path = str(data.get("path", query.get("path", [""])[0]))
+        try:
+            if not raw_path and method in {"GET", "POST"}:
+                path = ""
+                root = self.server.shared_dir
+            else:
+                path = self.checked_name(raw_path, write=method != "GET")
+                root = self.server.shared_dir / path
+            if not root.is_dir() or root.is_symlink():
+                raise ValueError("目录不存在")
+            if method == "GET":
+                directories = []
+                for child in root.iterdir():
+                    if child.name.startswith(".") or child.is_symlink() or not child.is_dir():
+                        continue
+                    child_path = f"{path}/{child.name}" if path else child.name
+                    self.checked_name(child_path)
+                    try:
+                        self.checked_name(child_path, write=True)
+                        can_write = True
+                    except ValueError:
+                        can_write = False
+                    directories.append({"name": child.name, "path": child_path, "canWrite": can_write})
+                self.send_json(HTTPStatus.OK, {"directories": directories})
+                return
+            if method in {"PATCH", "DELETE"} and path.startswith(".personal/") and path.count("/") == 1:
+                raise ValueError("请使用顶层文件夹管理接口")
+            if method in {"PATCH", "DELETE"} and any(s.name.startswith(path + "/") for s in self.server.upload_sessions.values()):
+                raise ValueError("目录包含未完成上传")
+            if method == "DELETE":
+                shutil.rmtree(root)
+            else:
+                name = str(data.get("name") or "").strip()
+                safe_filename(name)
+                if name.startswith(".") or ":" in name:
+                    raise ValueError("目录名无效")
+                target = (root if method == "POST" else root.parent) / name
+                parent_path = path.rpartition("/")[0]
+                target_path = f"{path}/{name}" if method == "POST" and path else name if method == "POST" else f"{parent_path}/{name}" if parent_path else name
+                self.checked_name(target_path, write=True)
+                if target.exists():
+                    raise ValueError("目标目录已存在")
+                if method == "POST":
+                    target.mkdir()
+                else:
+                    root.rename(target)
+                    with _ORDER_LOCK:
+                        order, counter, ingested = _read_order(self.server.shared_dir)
+                        for mapping in (order, ingested):
+                            for old in list(mapping):
+                                if old.startswith(path + "/"):
+                                    mapping[target_path + old[len(path):]] = mapping.pop(old)
+                        _write_order(self.server.shared_dir, order, counter, ingested)
+            self.send_json(HTTPStatus.OK, {"status": "success"})
+        except (ValueError, OSError) as exc:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
 
     def handle_index(self) -> None:
         """Serve the SPA shell with ETag revalidation + gzip.
@@ -2186,6 +2531,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                         continue  # raced with a delete; skip instead of failing
                     rel = fname if depth == 0 else (rel_dir / fname).as_posix()
                     entries.append((rel, path, stat))
+            for folder in self.server.personal_dir.iterdir():
+                if not is_valid_session_id(folder.name) or folder.is_symlink() or not folder.is_dir():
+                    continue
+                for rel in iter_shared_file_relpaths(folder, include_personal=False):
+                    path = folder / rel
+                    try:
+                        entries.append((f".personal/{folder.name}/{rel}", path, path.stat()))
+                    except OSError:
+                        continue
             # 排序规则：最新内容置顶。序号表仍然只认"传输先后顺序"（complete
             # 时递增），但输出改为倒序：刚传完的文件排在列表最前面，已有项的
             # 相对顺序不受影响。直接拷进目录、没有序号的文件按 mtime 倒序垫底
@@ -2210,16 +2564,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                     transferred.append((rel, stat, seq))
             external.sort(key=lambda row: (-row[1].st_mtime, row[0]))
             transferred.sort(key=lambda row: -row[2])
-            files = [
-                {
+            files = []
+            for rel, stat, _ in transferred + external:
+                try:
+                    self.checked_name(rel)
+                except ValueError:
+                    continue
+                try:
+                    self.checked_name(rel, write=True)
+                    can_write = True
+                except ValueError:
+                    can_write = False
+                files.append({
                     "name": rel,
                     "size": stat.st_size,
                     "date": datetime.fromtimestamp(stat.st_mtime).strftime(
                         "%Y-%m-%d %H:%M"
                     ),
-                }
-                for rel, stat, _ in transferred + external
-            ]
+                    "canWrite": can_write,
+                })
             # 在目录里被直接删掉的文件会留下孤儿序号，顺手清掉
             stale = set(order) - present
             if stale:
@@ -2259,7 +2622,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         inline=False -> Content-Disposition: attachment (force download)
         """
         try:
-            name = safe_relpath(raw_name)
+            name = self.checked_name(raw_name)
         except ValueError as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
             return
@@ -2444,7 +2807,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                name = safe_relpath(raw)
+                name = self.checked_name(raw)
             except ValueError as exc:
                 self.send_json(
                     HTTPStatus.BAD_REQUEST,
@@ -2454,7 +2817,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             if name in seen:
                 continue
             seen.add(name)
-            if any(part.startswith(".") for part in name.split("/")):
+            if any(part.startswith(".") for part in (name.split("/")[2:] if name.startswith(".personal/") else name.split("/"))):
                 self.send_json(
                     HTTPStatus.BAD_REQUEST,
                     {"status": "error", "message": f"不允许打包隐藏路径：「{name}」"},
@@ -2575,7 +2938,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         """
         raw_name = query.get("name", [""])[0]
         try:
-            name = safe_relpath(raw_name)
+            name = self.checked_name(raw_name)
         except ValueError as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
             return
@@ -2626,7 +2989,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         """
         raw_name = query.get("name", [""])[0]
         try:
-            name = safe_relpath(raw_name)
+            name = self.checked_name(raw_name)
         except ValueError as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
             return
@@ -2670,10 +3033,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         a friendly HTML notice with a download link. Zero third-party deps.
         """
         try:
-            name = safe_relpath(raw_name)
+            name = self.checked_name(raw_name)
         except ValueError as exc:
             self.send_bytes(
-                HTTPStatus.BAD_REQUEST,
+                HTTPStatus.FORBIDDEN if str(exc).startswith("无权访问") else HTTPStatus.BAD_REQUEST,
                 _doc_html_page(
                     f"<p class='note'>文件名无效：{_esc(str(exc))}</p>", "错误"
                 ),
@@ -2761,8 +3124,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return None
+        user = self.current_user()
+        try:
+            if not user or session.owner_id != user["id"]:
+                raise ValueError("无权访问上传会话")
+            self.checked_name(session.name, write=True)
+        except ValueError as exc:
+            self.fail(HTTPStatus.FORBIDDEN, str(exc), MAX_UPLOAD_CHUNK)
+            return None
         return session
 
+    @filesystem_operation
     def handle_upload_init(self) -> None:
         """Create or resume an upload session.
 
@@ -2774,7 +3146,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            name = safe_relpath(str(data.get("name", "")))
+            name = self.checked_name(str(data.get("name", "")), write=True)
         except ValueError as exc:
             self.send_json(
                 HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)}
@@ -2853,6 +3225,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             session = None
             if is_valid_session_id(requested):
                 session = self.server.get_session(requested)
+                if session is not None and session.owner_id not in (None, self.current_user()["id"]):
+                    self.send_json(HTTPStatus.FORBIDDEN, {"status": "error", "message": "无权访问上传会话"})
+                    return
+                if session is not None and session.owner_id is None and session.name == name and session.size == size:
+                    session.owner_id = self.current_user()["id"]
+                    session.save_meta()
                 if session is not None and (session.name != name or session.size != size):
                     # Stale session for a different payload - start over.
                     session.discard()
@@ -2872,7 +3250,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 resumed_by = None
             if session is None:
                 match = self.server.find_session_by_fingerprint(
-                    name, size, last_modified
+                    name, size, last_modified, self.current_user()["id"]
                 )
                 if match is not None:
                     active = match.is_active(window)
@@ -2897,7 +3275,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     else uuid.uuid4().hex
                 )
                 session = UploadSession(
-                    session_id, name, size, last_modified, self.server.uploads_dir
+                    session_id, name, size, last_modified, self.server.uploads_dir, self.current_user()["id"]
                 )
                 session.discard()
                 session.part.touch()
@@ -2970,6 +3348,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             },
         )
 
+    @filesystem_operation
     def handle_upload_chunk(self, query: dict[str, list[str]]) -> None:
         """Append one chunk.
 
@@ -3099,6 +3478,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             },
         )
 
+    @filesystem_operation
     def handle_upload_complete(self, query: dict[str, list[str]]) -> None:
         """Finalise a session: verify size, then atomically publish the file."""
         session = self._session_from_query(query)
@@ -3161,6 +3541,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             },
         )
 
+    @filesystem_operation
     def handle_upload_abort(self, query: dict[str, list[str]]) -> None:
         """Throw away a session and its partial data."""
         session_id = (query.get("sessionId") or [""])[0].strip()
@@ -3172,13 +3553,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         session = self.server.get_session(session_id)
         if session is not None:
-            session.discard()
-            self.server.drop_session(session_id)
-        else:
-            (self.server.uploads_dir / f"{session_id}.part").unlink(missing_ok=True)
-            (self.server.uploads_dir / f"{session_id}.json").unlink(missing_ok=True)
+            session = self._session_from_query(query)
+            if session is None:
+                return
+            with session.lock:
+                session.discard()
+                self.server.drop_session(session_id)
         self.send_json(HTTPStatus.OK, {"status": "success", "message": "上传已取消"})
 
+    @filesystem_operation
     def handle_upload(self, query: dict[str, list[str]]) -> None:
         """Legacy single-request upload (kept for old clients / scripts).
 
@@ -3207,7 +3590,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         raw_name = query.get("filename", [""])[0]
         try:
-            name = safe_filename(raw_name)
+            name = self.checked_name(raw_name, write=True)
         except ValueError as exc:
             self.fail(HTTPStatus.BAD_REQUEST, str(exc), LEGACY_UPLOAD_MAX)
             return
@@ -3246,13 +3629,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             {"status": "success", "message": "文件上传成功", "name": name},
         )
 
+    @filesystem_operation
     def handle_delete(self) -> None:
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             if content_length <= 0 or content_length > 64 * 1024:
                 raise ValueError("请求内容长度无效")
             data = json.loads(self.read_body(content_length).decode("utf-8"))
-            name = safe_relpath(str(data.get("filename", "")))
+            name = self.checked_name(str(data.get("filename", "")), write=True)
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             self.fail(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -3274,7 +3658,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         drop_file_order(self.server.shared_dir, name)
         # F5：删掉子目录里最后一个文件后，顺手清理空目录（不碰共享根目录）
-        _prune_empty_parents(self.server.shared_dir, path)
         self.send_json(HTTPStatus.OK, {"status": "success", "message": "文件已删除"})
 
     def handle_clipboard_delete(self, query: dict[str, list[str]]) -> None:
@@ -3504,14 +3887,10 @@ def parse_args() -> argparse.Namespace:
     if guest_pin is not None:
         guest_pin = str(guest_pin).strip()
     args.guest_pin = guest_pin or None
-    if args.guest_pin and not args.pin:
-        parser.error(
-            "设置了访客口令（--guest-pin / LAN_TRANSFER_GUEST_PIN）但未设置主人口令"
-            "（--pin / LAN_TRANSFER_PIN）。访客口令必须与主人口令同时使用。"
-        )
-    if args.guest_pin and args.guest_pin == args.pin:
-        print("提示：访客口令与主人口令相同，访客口令不生效，输入该口令一律按主人登录。")
-        args.guest_pin = None
+    if args.pin or args.guest_pin:
+        print("提示：--pin 和 --guest-pin 已停用，请使用个人账号登录。")
+    args.pin = None
+    args.guest_pin = None
 
     if args.ttl_days is None:
         env_ttl = os.environ.get("LAN_TRANSFER_TTL_DAYS", "").strip()
@@ -3607,6 +3986,9 @@ def main() -> int:
             guest_pin=args.guest_pin,
             file_ttl_days=args.ttl_days,
         )
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"启动失败：账号数据无效（{exc}）", file=sys.stderr)
+        return 1
     except OSError as exc:
         code = getattr(exc, "winerror", None) or exc.errno
         if code in {errno.EADDRINUSE, 10048}:
