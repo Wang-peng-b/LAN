@@ -3179,6 +3179,7 @@
     async function pumpUploadQueue() {
       if (queuePumpRunning) return;
       queuePumpRunning = true;
+      let completedAny = false;
       cancelProgressReset();
       elements.progress.style.display = 'block';
       try {
@@ -3204,6 +3205,9 @@
               job.status = 'done';
               job.percent = 100;
               paintProgress(job.name, 100, job.size, job.size, 'ok');
+              completedAny = true;
+              const completedIndex = uploadQueue.findIndex(item => item.id === job.id);
+              if (completedIndex >= 0) uploadQueue.splice(completedIndex, 1);
             }
           } catch (error) {
             if (job.cancelled || (error && error.code === 'UPLOAD_CANCELLED') ||
@@ -3236,7 +3240,7 @@
           pumpUploadQueue();
         } else if (failed) {
           scheduleProgressReset(4000);
-        } else if (uploadQueue.some(j => j.status === 'done')) {
+        } else if (completedAny) {
           elements.status.textContent = '上传完成';
           elements.fill.className = 'fill ok';
           scheduleProgressReset(900);
